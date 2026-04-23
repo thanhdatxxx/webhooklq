@@ -3,27 +3,32 @@ const express = require('express');
 const cors = require('cors');
 const { PayOS } = require('@payos/node');
 const admin = require('firebase-admin');
+const path = require('path');
+const fs = require('fs');
 
 const app = express();
 
 // --- 1. CẤU HÌNH FIREBASE ADMIN ---
-// Thử dùng trực tiếp file serviceAccountKey.json để kiểm tra lỗi
+let db;
 try {
-    const serviceAccount = require("./serviceAccountKey.json");
+    // Dùng đường dẫn tuyệt đối để Render dễ tìm file
+    const serviceAccountPath = path.join(__dirname, 'serviceAccountKey.json');
 
-    if (!admin.apps.length) {
-        admin.initializeApp({
-            credential: admin.credential.cert(serviceAccount)
-        });
-        console.log("✅ Firebase Admin Ready - Project:", serviceAccount.project_id);
+    if (fs.existsSync(serviceAccountPath)) {
+        const serviceAccount = require(serviceAccountPath);
+        if (!admin.apps.length) {
+            admin.initializeApp({
+                credential: admin.credential.cert(serviceAccount)
+            });
+            console.log("✅ Firebase Admin Ready - Project:", serviceAccount.project_id);
+        }
+        db = admin.firestore();
+    } else {
+        console.error("❌ ERROR: File serviceAccountKey.json KHONG TON TAI tai:", serviceAccountPath);
     }
 } catch (e) {
-    console.error("❌ Lỗi khởi tạo Firebase:");
-    console.error("- Hãy chắc chắn file serviceAccountKey.json nằm cùng cấp với file node.js");
-    console.error("- Nội dung lỗi:", e.message);
+    console.error("❌ Lỗi khởi tạo Firebase:", e.message);
 }
-
-const db = admin.firestore();
 
 // --- 2. MIDDLEWARE ---
 app.use(cors());
@@ -37,43 +42,40 @@ const payos = new PayOS(
     process.env.PAYOS_CHECKSUM_KEY
 );
 
-// --- 4. GIAO DIỆN PHỤ ---
-app.get('/success', (req, res) => {
-    res.send(`<html><body style="text-align:center;font-family:sans-serif;padding-top:100px;background:#0f172a;color:white;">
-        <h1 style="color:#4ade80;">Thanh toán thành công!</h1>
-        <p>Hệ thống đang xử lý giao dịch. Vui lòng quay lại ứng dụng.</p>
-        <script>setTimeout(() => { window.close(); }, 3000);</script>
-    </body></html>`);
+// --- 4. API DEBUG (Để kiểm tra lỗi trên Render) ---
+app.get('/debug', (req, res) => {
+    res.json({
+        firebase_app: admin.apps.length > 0 ? "Initialized" : "Failed",
+        project_id: admin.apps.length > 0 ? admin.app().options.credential.projectId : "None",
+        key_file_exists: fs.existsSync(path.join(__dirname, 'serviceAccountKey.json')),
+        cwd: __dirname
+    });
 });
-
-app.get('/cancel', (req, res) => res.send("Giao dịch đã bị hủy."));
 
 // --- 5. API TẠO LINK THANH TOÁN ---
 app.post('/create-payment-link', async (req, res) => {
     try {
-        const { orderId, accountCode } = req.body;
+        if (!db) {
+            return res.status(500).json({ error: "Firebase chưa được khởi tạo. Vui lòng kiểm tra log Render." });
+        }
 
-        // 1. Lấy thông tin order từ Firebase
+        const { orderId, accountCode } = req.body;
         const orderRef = db.collection('orders').doc(orderId);
         const orderDoc = await orderRef.get();
 
         if (!orderDoc.exists) {
-            return res.status(404).json({ error: "Không tìm thấy đơn hàng trên hệ thống." });
+            return res.status(404).json({ error: "Không tìm thấy đơn hàng." });
         }
 
         const { amount } = orderDoc.data();
-
-        // 2. Tạo orderCode duy nhất (Số nguyên, tối đa 10 chữ số cho an toàn)
         const orderCode = Number(Date.now().toString().slice(-9));
 
-        // 3. Cập nhật mã chuyển khoản vào Order để Webhook đối soát
         await orderRef.update({
             orderCode: orderCode,
             account_code: Number(accountCode),
             status: 'pending'
         });
 
-        // 4. Tạo Link PayOS
         const body = {
             orderCode: orderCode,
             amount: Math.round(amount),
@@ -91,68 +93,51 @@ app.post('/create-payment-link', async (req, res) => {
     }
 });
 
-// --- 6. API WEBHOOK (Xử lý khi có tiền về) ---
+// --- 6. API WEBHOOK ---
 app.post('/payos-webhook', async (req, res) => {
     try {
         const webhookData = await payos.webhooks.verify(req.body);
-
         if (webhookData) {
-            const orderCode = webhookData.orderCode;
-
-            // 1. Tìm Order tương ứng
             const ordersSnapshot = await db.collection('orders')
-                .where('orderCode', '==', orderCode)
-                .limit(1)
-                .get();
+                .where('orderCode', '==', webhookData.orderCode)
+                .limit(1).get();
 
             if (!ordersSnapshot.empty) {
                 const orderDoc = ordersSnapshot.docs[0];
-                const orderId = orderDoc.id;
                 const { user_id, account_id, amount, account_code } = orderDoc.data();
-
-                // 2. Lấy thông tin Nick và User
                 const accountRef = db.collection('accounts').doc(account_id);
                 const accountSnap = await accountRef.get();
-                const userSnap = await db.collection('user').doc(user_id).get();
 
                 if (accountSnap.exists) {
                     const accountData = accountSnap.data();
-                    const userName = userSnap.exists ? (userSnap.data().user_name || userSnap.data().full_name) : "Khách QR";
-
-                    // A. Cập nhật Nick thành "Đã bán"
                     await accountRef.update({
                         status: 'Đã bán',
-                        sold_to: userName,
+                        sold_to: user_id,
                         sold_at: admin.firestore.FieldValue.serverTimestamp()
                     });
-
-                    // B. Ghi lịch sử giao dịch
                     await db.collection('history').add({
-                        user_id: user_id,
-                        user_name: userName,
-                        account_id: account_id,
+                        user_id,
+                        account_id,
                         account_code: account_code || 0,
-                        amount: amount,
+                        amount,
                         taikhoan: accountData.taikhoan,
                         matkhau: accountData.matkhau,
                         status: 'Thành công',
                         type: 'purchase',
                         created_at: admin.firestore.FieldValue.serverTimestamp()
                     });
-
-                    // C. Hoàn tất Order
-                    await db.collection('orders').doc(orderId).update({ status: 'completed' });
-
-                    console.log(`✅ Đã giao nick MS${account_code} cho ${userName}`);
+                    await orderDoc.ref.update({ status: 'completed' });
                 }
             }
         }
-        return res.json({ error: 0, message: "Ok" });
+        return res.json({ error: 0 });
     } catch (error) {
-        console.error("Webhook Error:", error);
-        return res.json({ error: -1, message: "Lỗi" });
+        return res.json({ error: -1 });
     }
 });
+
+app.get('/success', (req, res) => res.send("Thanh toán thành công!"));
+app.get('/cancel', (req, res) => res.send("Đã hủy giao dịch."));
 
 const PORT = process.env.PORT || 10000;
 app.listen(PORT, '0.0.0.0', () => console.log(`🚀 Server ready on port ${PORT}`));
