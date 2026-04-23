@@ -15,11 +15,11 @@ app.use(express.json());
 
 // 1. Cấu hình PayOS với thông tin bạn đã chụp ảnh
 // Cập nhật phần cấu hình PayOS trong file node.js
-const payos = new PayOS(
-    process.env.PAYOS_CLIENT_ID,     // Thay cho mã cũ
-    process.env.PAYOS_API_KEY,        // Thay cho mã cũ
-    process.env.PAYOS_CHECKSUM_KEY    // Thay cho mã cũ
-);
+const payos = new PayOS({
+    PAYOS_CLIENT_ID: process.env.PAYOS_CLIENT_ID,
+    PAYOS_API_KEY: process.env.PAYOS_API_KEY,
+    PAYOS_CHECKSUM_KEY: process.env.PAYOS_CHECKSUM_KEY
+});
 
 // 2. API Tạo link thanh toán VietQR
 app.post('/create-payment-link', async (req, res) => {
