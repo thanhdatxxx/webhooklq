@@ -1,8 +1,12 @@
 require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
-const { PayOS } = require('@payos/node').default; // Fix lỗi constructor
+
+// Sửa dòng này: Không dùng destructuring { PayOS } nếu dùng .default
+const PayOS = require('@payos/node').default; 
+
 const admin = require('firebase-admin');
+// ... giữ nguyên phần khởi tạo Firebase và Express bên dưới
 
 const app = express();
 
