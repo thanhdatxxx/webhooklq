@@ -35,19 +35,19 @@ const payos = new PayOS(
 // API Tạo link thanh toán
 app.post('/create-payment-link', async (req, res) => {
     try {
-        const { amount, accountCode } = req.body;
+        const { amount, accountCode, userName } = req.body; // Thêm userName
         const orderCode = Number(Date.now().toString().slice(-6));
 
         const body = {
             orderCode: orderCode,
             amount: amount,
-            description: `Thanh toan MS${accountCode}`,
+            // QUAN TRỌNG: Gắn cả accountCode và userName vào để Webhook đọc lại
+            description: `MS${accountCode} USER_${userName}`, 
             cancelUrl: `https://webhooklq.onrender.com/cancel`,
             returnUrl: `https://webhooklq.onrender.com/success`,
         };
 
         const paymentLinkResponse = await payos.paymentRequests.create(body);
-        
         // Trả về đúng cấu trúc mà App Flutter đang chờ
         res.json({
             checkoutUrl: paymentLinkResponse.checkoutUrl,
@@ -62,77 +62,50 @@ app.post('/create-payment-link', async (req, res) => {
 // API Webhook - Xử lý tự động khi PayOS báo thành công
 app.post('/payos-webhook', async (req, res) => {
     try {
-        // Xác thực webhook từ PayOS
         const webhookData = await payos.webhooks.verify(req.body);
-        
         if (webhookData) {
-            console.log("✅ Thanh toán thành công:", {
-                orderCode: webhookData.orderCode,
-                amount: webhookData.amount,
-                description: webhookData.description,
-                reference: webhookData.reference
-            });
+            const desc = webhookData.description; // Ví dụ: "MS123002 USER_thanhdat"
+            // Tách dữ liệu từ description
+            const accountCode = desc.match(/MS(\d+)/)?.[1];
+            const userName = desc.match(/USER_(\w+)/)?.[1] || "Khách VietQR";
 
-            // Trích xuất accountCode từ description (format: "Thanh toan MS{accountCode}")
-            const accountCode = webhookData.description.match(/MS(\w+)/)?.[1];
-            
             if (accountCode) {
-                // ===== TÌM KIẾM NICK TRONG COLLECTION accounts =====
-                const accountsSnapshot = await db.collection('accounts')
-                    .where('accountCode', '==', accountCode)
-                    .limit(1)
-                    .get();
+                // 1. Tìm nick trong collection 'accounts'
+                // Lưu ý: Kiểm tra lại tên field trong Firestore là 'accountCode' hay 'account_code'
+                const snapshot = await db.collection('accounts')
+                    .where('account_code', '==', parseInt(accountCode)) // Nếu trong DB là kiểu Number
+                    .limit(1).get();
 
-                if (!accountsSnapshot.empty) {
-                    const accountDoc = accountsSnapshot.docs[0];
-                    const accountData = accountDoc.data();
-                    const nick = accountData.nick;
+                if (!snapshot.empty) {
+                    const doc = snapshot.docs[0];
+                    const accountData = doc.data();
 
-                    console.log(`📌 Tìm thấy Nick: ${nick}`);
+                    // 2. Cập nhật trạng thái và người mua
+                    await doc.ref.update({
+                        status: 'Đã bán',
+                        sold_to: userName,
+                        sold_at: admin.firestore.FieldValue.serverTimestamp()
+                    });
 
-                    // ===== GHI HÓAĐƠN VÀO COLLECTION history =====
-                    const historyRecord = {
-                        nick: nick,
-                        accountCode: accountCode,
-                        orderCode: webhookData.orderCode,
+                    // 3. Ghi lịch sử mua hàng (giúp HistoryScreen hiển thị)
+                    await db.collection('history').add({
+                        user_name: userName,
+                        account_code: parseInt(accountCode),
+                        account_id: doc.id,
                         amount: webhookData.amount,
-                        reference: webhookData.reference,
-                        description: webhookData.description,
-                        paymentDate: webhookData.transactionDateTime,
-                        paymentMethod: 'PayOS',
-                        status: 'completed',
-                        timestamp: admin.firestore.FieldValue.serverTimestamp(),
-                        rawData: webhookData // Lưu toàn bộ dữ liệu webhook
-                    };
-
-                    // Lưu vào collection history
-                    const historyRef = await db.collection('history').add(historyRecord);
-                    
-                    console.log(`💾 Ghi hóa đơn thành công - Document ID: ${historyRef.id}`);
-
-                    // (Optional) Cập nhật balance hoặc trạng thái account
-                    // await accountDoc.ref.update({
-                    //     balance: admin.firestore.FieldValue.increment(webhookData.amount),
-                    //     lastPaymentDate: admin.firestore.FieldValue.serverTimestamp()
-                    // });
-
-                } else {
-                    console.warn(`⚠️ Không tìm thấy account với code: ${accountCode}`);
+                        transaction_code: webhookData.orderCode.toString(),
+                        type: 'purchase',
+                        created_at: admin.firestore.FieldValue.serverTimestamp()
+                    });
+                    console.log(`✅ Đã giao nick ${accountCode} cho ${userName}`);
                 }
-            } else {
-                console.warn("⚠️ Không tìm thấy accountCode trong description");
             }
         }
-
-        // Trả về response thành công cho PayOS
         return res.json({ error: 0, message: "Ok", data: null });
-        
     } catch (error) {
-        console.error("❌ Webhook Error:", error);
-        // Trả về error nhưng không dừa xử lý - PayOS sẽ retry
-        return res.json({ error: -1, message: "Lỗi xác thực", data: null });
-    }
+        return res.json({ error: -1, message: "Lỗi xác thực", data: null });    }
 });
+
 
 const PORT = process.env.PORT || 10000;
 app.listen(PORT, '0.0.0.0', () => {
