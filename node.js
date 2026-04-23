@@ -7,29 +7,22 @@ const admin = require('firebase-admin');
 const app = express();
 
 // --- 1. CẤU HÌNH FIREBASE ADMIN ---
-const serviceAccountKey = process.env.FIREBASE_SERVICE_ACCOUNT_KEY;
+// Thử dùng trực tiếp file serviceAccountKey.json để kiểm tra lỗi
+try {
+    const serviceAccount = require("./serviceAccountKey.json");
 
-if (!admin.apps.length) {
-    try {
-        let config;
-        if (serviceAccountKey) {
-            config = JSON.parse(serviceAccountKey);
-            // Quan trọng: Fix lỗi ký tự \n trong Private Key trên Render
-            if (config.private_key) {
-                config.private_key = config.private_key.replace(/\\n/g, '\n');
-            }
-        } else {
-            config = require("./serviceAccountKey.json");
-        }
-
+    if (!admin.apps.length) {
         admin.initializeApp({
-            credential: admin.credential.cert(config)
+            credential: admin.credential.cert(serviceAccount)
         });
-        console.log("✅ Firebase Admin Ready");
-    } catch (e) {
-        console.error("❌ Firebase Auth Error:", e);
+        console.log("✅ Firebase Admin Ready - Project:", serviceAccount.project_id);
     }
+} catch (e) {
+    console.error("❌ Lỗi khởi tạo Firebase:");
+    console.error("- Hãy chắc chắn file serviceAccountKey.json nằm cùng cấp với file node.js");
+    console.error("- Nội dung lỗi:", e.message);
 }
+
 const db = admin.firestore();
 
 // --- 2. MIDDLEWARE ---
@@ -120,7 +113,6 @@ app.post('/payos-webhook', async (req, res) => {
                 // 2. Lấy thông tin Nick và User
                 const accountRef = db.collection('accounts').doc(account_id);
                 const accountSnap = await accountRef.get();
-                // Sửa từ 'users' thành 'user' cho đúng cấu trúc bạn đã mô tả
                 const userSnap = await db.collection('user').doc(user_id).get();
 
                 if (accountSnap.exists) {
