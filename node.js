@@ -11,11 +11,18 @@ const app = express();
 // --- 1. CẤU HÌNH FIREBASE ADMIN ---
 let db;
 try {
-    // Dùng đường dẫn tuyệt đối để Render dễ tìm file
     const serviceAccountPath = path.join(__dirname, 'serviceAccountKey.json');
 
     if (fs.existsSync(serviceAccountPath)) {
-        const serviceAccount = require(serviceAccountPath);
+        // Đọc file dưới dạng string để xử lý lỗi format
+        let rawData = fs.readFileSync(serviceAccountPath, 'utf8');
+        let serviceAccount = JSON.parse(rawData);
+
+        // QUAN TRỌNG: Sửa lỗi \\n thành \n trong Private Key
+        if (serviceAccount.private_key && serviceAccount.private_key.includes('\\n')) {
+            serviceAccount.private_key = serviceAccount.private_key.replace(/\\n/g, '\n');
+        }
+
         if (!admin.apps.length) {
             admin.initializeApp({
                 credential: admin.credential.cert(serviceAccount)
@@ -42,7 +49,7 @@ const payos = new PayOS(
     process.env.PAYOS_CHECKSUM_KEY
 );
 
-// --- 4. API DEBUG (Để kiểm tra lỗi trên Render) ---
+// --- 4. API DEBUG ---
 app.get('/debug', (req, res) => {
     res.json({
         firebase_app: admin.apps.length > 0 ? "Initialized" : "Failed",
@@ -55,17 +62,13 @@ app.get('/debug', (req, res) => {
 // --- 5. API TẠO LINK THANH TOÁN ---
 app.post('/create-payment-link', async (req, res) => {
     try {
-        if (!db) {
-            return res.status(500).json({ error: "Firebase chưa được khởi tạo. Vui lòng kiểm tra log Render." });
-        }
+        if (!db) return res.status(500).json({ error: "Firebase chưa được khởi tạo thành công." });
 
         const { orderId, accountCode } = req.body;
         const orderRef = db.collection('orders').doc(orderId);
         const orderDoc = await orderRef.get();
 
-        if (!orderDoc.exists) {
-            return res.status(404).json({ error: "Không tìm thấy đơn hàng." });
-        }
+        if (!orderDoc.exists) return res.status(404).json({ error: "Không tìm thấy đơn hàng." });
 
         const { amount } = orderDoc.data();
         const orderCode = Number(Date.now().toString().slice(-9));
