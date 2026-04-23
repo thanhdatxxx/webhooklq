@@ -56,7 +56,7 @@ app.get('/cancel', (req, res) => {
 // --- 5. API TẠO LINK THANH TOÁN ---
 app.post('/create-payment-link', async (req, res) => {
     try {
-        const { amount, accountId, accountCode, userName } = req.body;
+        const { amount, id, userName } = req.body; // id là trường trong document, không phải document ID
         
         // Tạo mã đơn hàng ngẫu nhiên (số)
         const orderCode = Number(Date.now().toString().slice(-6));
@@ -64,8 +64,8 @@ app.post('/create-payment-link', async (req, res) => {
         const body = {
             orderCode: orderCode,
             amount: amount,
-            // Gửi ID vào description (max 25 kí tự)
-            description: `${accountId}`,
+            // Gửi field id vào description (max 25 kí tự)
+            description: `${id}`,
             cancelUrl: `https://webhooklq.onrender.com/cancel`,
             returnUrl: `https://webhooklq.onrender.com/success`,
         };
@@ -91,22 +91,26 @@ app.post('/payos-webhook', async (req, res) => {
         if (webhookData) {
             console.log("✅ Nhận tín hiệu thanh toán thành công:", webhookData.description);
             
-            // Description chứa accountId
-            const accountId = webhookData.description.trim();
+            // Description chứa field id
+            const fieldId = webhookData.description.trim();
             
-            if (accountId) {
+            if (fieldId) {
                 // Query Firestore để tìm document theo field id
-                const accountDoc = await db.collection('accounts').doc(accountId).get();
+                const querySnapshot = await db.collection('accounts')
+                    .where('id', '==', fieldId)
+                    .limit(1)
+                    .get();
 
-                if (accountDoc.exists) {
+                if (!querySnapshot.empty) {
+                    const accountDoc = querySnapshot.docs[0];
+                    const docId = accountDoc.id;
                     const accountData = accountDoc.data();
                     const userName = accountData.sold_to || "Unknown"; // Tên người mua
 
                     // ===== A. LẤY THÔNG TIN TÀI KHOẢN & LƯUCHO KHÁCH =====
                     await db.collection('user').add({
                         user_name: userName,
-                        account_id: accountId,
-                        id: accountData?.id || "N/A",
+                        id: fieldId,
                         taikhoan: accountData?.taikhoan || "N/A",
                         matkhau: accountData?.matkhau || "N/A",
                         hero_count: accountData?.hero_count || 0,
@@ -117,7 +121,7 @@ app.post('/payos-webhook', async (req, res) => {
                     });
                     
                     // ===== B. CẬP NHẬT STATUS TÀI KHOẢN THÀNH "ĐÃ BÁN" =====
-                    await db.collection('accounts').doc(accountId).update({
+                    await db.collection('accounts').doc(docId).update({
                         status: 'Đã bán',
                         sold_to: userName,
                         sold_at: admin.firestore.FieldValue.serverTimestamp()
@@ -126,8 +130,7 @@ app.post('/payos-webhook', async (req, res) => {
                     // ===== C. GHI LỮC SỬ GIAO DỊCH =====
                     await db.collection('history').add({
                         user_name: userName,
-                        id: accountData?.id || "N/A",
-                        account_id: accountId,
+                        id: fieldId,
                         taikhoan: accountData?.taikhoan || "N/A",
                         amount: webhookData.amount,
                         transaction_code: webhookData.orderCode.toString(),
@@ -136,10 +139,10 @@ app.post('/payos-webhook', async (req, res) => {
                         created_at: admin.firestore.FieldValue.serverTimestamp()
                     });
 
-                    console.log(`💾 ✅ Đã giao nick ID: ${accountId} cho User: ${userName}`);
+                    console.log(`💾 ✅ Đã giao nick ID: ${fieldId} cho User: ${userName}`);
                     console.log(`📝 Tài khoản: ${accountData?.taikhoan} | Mật khẩu: ${accountData?.matkhau}`);
                 } else {
-                    console.log(`⚠️ Không tìm thấy tài khoản ID: ${accountId}`);
+                    console.log(`⚠️ Không tìm thấy tài khoản với ID: ${fieldId}`);
                 }
             }
         }
