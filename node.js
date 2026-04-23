@@ -3,7 +3,14 @@ const { PayOS } = require("@payos/node");
 const cors = require('cors');
 
 const app = express();
-app.use(cors());
+
+// Cấu hình CORS cực kỳ quan trọng
+app.use(cors({
+    origin: '*', // Cho phép tất cả các nguồn (bao gồm localhost của bạn)
+    methods: ['GET', 'POST'],
+    allowedHeaders: ['Content-Type']
+}));
+
 app.use(express.json());
 
 // 1. Cấu hình PayOS với thông tin bạn đã chụp ảnh
