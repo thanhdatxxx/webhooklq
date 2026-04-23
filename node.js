@@ -1,6 +1,8 @@
+require('dotenv').config();
+
 const express = require('express');
 const cors = require('cors');
-const { PayOS } = require("@payos/node");
+const { PayOS } = require('@payos/node');
 
 const app = express();
 
@@ -30,7 +32,7 @@ app.post('/create-payment-link', async (req, res) => {
             returnUrl: `https://webhooklq.onrender.com/success`,
         };
 
-        const paymentLinkResponse = await payos.createPaymentLink(body);
+        const paymentLinkResponse = await payos.paymentRequests.create(body);
         
         // Trả về đúng cấu trúc mà App Flutter đang chờ
         res.json({
@@ -46,7 +48,7 @@ app.post('/create-payment-link', async (req, res) => {
 // API Webhook
 app.post('/payos-webhook', async (req, res) => {
     try {
-        const webhookData = payos.verifyPaymentWebhookData(req.body);
+        const webhookData = await payos.webhooks.verify(req.body);
         if (webhookData) {
             console.log("Thanh toán thành công đơn hàng:", webhookData.orderCode);
         }
