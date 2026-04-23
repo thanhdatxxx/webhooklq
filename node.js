@@ -98,26 +98,46 @@ app.post('/payos-webhook', async (req, res) => {
             const accountCode = desc.match(/MS(\d+)/)?.[1] || "000";
 
             if (docId) {
-                // A. Cập nhật trạng thái nick trong Firestore bằng ID trực tiếp
-                const accountRef = db.collection('accounts').doc(docId);
-                await accountRef.update({
+                // ===== A. LẤY THÔNG TIN TÀI KHOẢN & LƯUCHO KHÁCH =====
+                const accountDoc = await db.collection('accounts').doc(docId).get();
+                const accountData = accountDoc.data();
+                
+                // Lưu tài khoản & mật khẩu vào collection "user" cho khách hàng
+                await db.collection('user').add({
+                    user_name: userName,
+                    account_id: docId,
+                    account_code: accountData?.account_code || accountCode,
+                    taikhoan: accountData?.taikhoan || "N/A",
+                    matkhau: accountData?.matkhau || "N/A",
+                    hero_count: accountData?.hero_count || 0,
+                    skin_count: accountData?.skin_count || 0,
+                    rank: accountData?.rank || "N/A",
+                    price: accountData?.price || 0,
+                    purchased_at: admin.firestore.FieldValue.serverTimestamp()
+                });
+                
+                // ===== B. CẬP NHẬT STATUS TÀI KHOẢN THÀNH "ĐÃ BÁN" =====
+                await db.collection('accounts').doc(docId).update({
                     status: 'Đã bán',
                     sold_to: userName,
                     sold_at: admin.firestore.FieldValue.serverTimestamp()
                 });
 
-                // B. Ghi vào lịch sử mua hàng cho người dùng
+                // ===== C. GHI LỮC SỬ GIAO DỊCH =====
                 await db.collection('history').add({
                     user_name: userName,
                     account_code: parseInt(accountCode),
                     account_id: docId,
+                    taikhoan: accountData?.taikhoan || "N/A",
                     amount: webhookData.amount,
                     transaction_code: webhookData.orderCode.toString(),
                     type: 'purchase',
+                    status: 'Thành công',
                     created_at: admin.firestore.FieldValue.serverTimestamp()
                 });
 
-                console.log(`💾 Đã giao nick ID: ${docId} cho User: ${userName}`);
+                console.log(`💾 ✅ Đã giao nick ID: ${docId} cho User: ${userName}`);
+                console.log(`📝 Tài khoản: ${accountData?.taikhoan} | Mật khẩu: ${accountData?.matkhau}`);
             }
         }
 
