@@ -56,28 +56,45 @@ app.get('/cancel', (req, res) => {
 // --- 5. API TẠO LINK THANH TOÁN ---
 app.post('/create-payment-link', async (req, res) => {
     try {
-        const { amount, id, userName } = req.body; // id là trường trong document, không phải document ID
+        const { orderId, accountCode } = req.body; 
+        // orderId = Document ID của orders collection (được tạo từ client)
         
-        // Tạo mã đơn hàng ngẫu nhiên (số)
-        const orderCode = Number(Date.now().toString().slice(-6));
+        // 1. QUERY ORDERS COLLECTION ĐỂ LẤY THÔNG TIN
+        const orderDoc = await db.collection('orders').doc(orderId).get();
+        if (!orderDoc.exists) {
+            return res.status(404).json({ error: "Order không tồn tại" });
+        }
+        
+        const orderData = orderDoc.data();
+        const { user_id, account_id, amount } = orderData;
+        
+        console.log(`📋 Tìm thấy order: user=${user_id}, account=${account_id}, amount=${amount}`);
 
+        // 2. Tạo orderCode là số nguyên duy nhất (PayOS bắt buộc là số)
+        const orderCode = Number(Date.now().toString().slice(-9));
+
+        // 3. LƯU ORDERCODE VÀO ORDERS COLLECTION ĐỂ WEBHOOK CÓ THỂ QUERY
+        await db.collection('orders').doc(orderId).update({
+            orderCode: orderCode,
+            status: 'pending'
+        });
+
+        // 4. TẠO PAYMENT LINK
         const body = {
             orderCode: orderCode,
             amount: amount,
-            // Gửi field id vào description (max 25 kí tự)
-            description: `${id}`,
+            description: `THANH TOAN MS${accountCode}`,
             cancelUrl: `https://webhooklq.onrender.com/cancel`,
             returnUrl: `https://webhooklq.onrender.com/success`,
         };
 
         const paymentLinkResponse = await payos.paymentRequests.create(body);
-        
-        res.json({
-            checkoutUrl: paymentLinkResponse.checkoutUrl,
-            orderCode: orderCode
+        res.json({ 
+            checkoutUrl: paymentLinkResponse.checkoutUrl, 
+            orderCode: orderCode 
         });
     } catch (error) {
-        console.error("PayOS Error:", error);
+        console.error("Create Payment Link Error:", error);
         res.status(500).json({ error: error.message });
     }
 });
@@ -85,65 +102,64 @@ app.post('/create-payment-link', async (req, res) => {
 // --- 6. API WEBHOOK (XỬ LÝ TỰ ĐỘNG HOÀN TOÀN) ---
 app.post('/payos-webhook', async (req, res) => {
     try {
-        // Xác thực tin nhắn từ PayOS
         const webhookData = await payos.webhooks.verify(req.body);
 
         if (webhookData) {
-            console.log("✅ Nhận tín hiệu thanh toán thành công:", webhookData.description);
-            
-            // Description chứa field id
-            const fieldId = webhookData.description.trim();
-            
-            if (fieldId) {
-                // Query Firestore để tìm document theo field id
-                const querySnapshot = await db.collection('accounts')
-                    .where('id', '==', fieldId)
-                    .limit(1)
-                    .get();
+            const orderCode = webhookData.orderCode;
+            console.log("✅ Nhận webhook từ PayOS - OrderCode:", orderCode);
 
-                if (!querySnapshot.empty) {
-                    const accountDoc = querySnapshot.docs[0];
-                    const docId = accountDoc.id;
-                    const accountData = accountDoc.data();
-                    const userName = accountData.sold_to || "Unknown"; // Tên người mua
+            // 1. QUERY ORDERS COLLECTION ĐỂ TÌM DOCUMENT CHỨA ORDERCODE NÀY
+            const ordersSnapshot = await db.collection('orders')
+                .where('orderCode', '==', orderCode)
+                .limit(1)
+                .get();
+            
+            if (!ordersSnapshot.empty) {
+                const orderDoc = ordersSnapshot.docs[0];
+                const orderId = orderDoc.id;
+                const { user_id, account_id, amount } = orderDoc.data();
+                
+                console.log(`📦 Tìm thấy order ${orderId}: user=${user_id}, account=${account_id}`);
 
-                    // ===== A. LẤY THÔNG TIN TÀI KHOẢN & LƯUCHO KHÁCH =====
-                    await db.collection('user').add({
-                        user_name: userName,
-                        id: fieldId,
-                        taikhoan: accountData?.taikhoan || "N/A",
-                        matkhau: accountData?.matkhau || "N/A",
-                        hero_count: accountData?.hero_count || 0,
-                        skin_count: accountData?.skin_count || 0,
-                        rank: accountData?.rank || "N/A",
-                        price: accountData?.price || 0,
-                        purchased_at: admin.firestore.FieldValue.serverTimestamp()
-                    });
-                    
-                    // ===== B. CẬP NHẬT STATUS TÀI KHOẢN THÀNH "ĐÃ BÁN" =====
-                    await db.collection('accounts').doc(docId).update({
+                // 2. LẤY THÔNG TIN USER VÀ ACCOUNT
+                const userSnap = await db.collection('user').doc(user_id).get();
+                const accountSnap = await db.collection('accounts').doc(account_id).get();
+
+                if (accountSnap.exists) {
+                    const accountData = accountSnap.data();
+                    const userName = userSnap.exists ? userSnap.data().user_name : "Unknown";
+
+                    // ===== A. CẬP NHẬT STATUS TÀI KHOẢN THÀNH "ĐÃ BÁN" =====
+                    await db.collection('accounts').doc(account_id).update({
                         status: 'Đã bán',
                         sold_to: userName,
                         sold_at: admin.firestore.FieldValue.serverTimestamp()
                     });
 
-                    // ===== C. GHI LỮC SỬ GIAO DỊCH =====
+                    // ===== B. GHI LỮC SỬ GIAO DỊCH =====
                     await db.collection('history').add({
-                        user_name: userName,
-                        id: fieldId,
+                        user_id: user_id,
+                        account_id: account_id,
+                        order_id: orderId,
+                        amount: amount,
                         taikhoan: accountData?.taikhoan || "N/A",
-                        amount: webhookData.amount,
-                        transaction_code: webhookData.orderCode.toString(),
-                        type: 'purchase',
                         status: 'Thành công',
                         created_at: admin.firestore.FieldValue.serverTimestamp()
                     });
+                    
+                    // ===== C. CẬP NHẬT TRẠNG THÁI ORDER =====
+                    await db.collection('orders').doc(orderId).update({
+                        status: 'completed',
+                        completed_at: admin.firestore.FieldValue.serverTimestamp()
+                    });
 
-                    console.log(`💾 ✅ Đã giao nick ID: ${fieldId} cho User: ${userName}`);
+                    console.log(`💾 ✅ Đã giao nick cho User: ${userName}`);
                     console.log(`📝 Tài khoản: ${accountData?.taikhoan} | Mật khẩu: ${accountData?.matkhau}`);
                 } else {
-                    console.log(`⚠️ Không tìm thấy tài khoản với ID: ${fieldId}`);
+                    console.log(`❌ Không tìm thấy tài khoản ID: ${account_id}`);
                 }
+            } else {
+                console.log(`❌ Không tìm thấy order với orderCode: ${orderCode}`);
             }
         }
 
