@@ -2,8 +2,8 @@ require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
 
-// Sửa dòng này: Không dùng destructuring { PayOS } nếu dùng .default
-const PayOS = require('@payos/node').default; 
+// Import PayOS - thử cách này trước
+const { PayOS } = require('@payos/node'); 
 
 const admin = require('firebase-admin');
 // ... giữ nguyên phần khởi tạo Firebase và Express bên dưới
