@@ -1,5 +1,5 @@
 const express = require('express');
-const PayOS = require("@payos/node").default;
+const { PayOS } = require("@payos/node");
 const cors = require('cors');
 
 const app = express();
