@@ -10,6 +10,8 @@ const app = express();
 
 // --- 1. CẤU HÌNH FIREBASE ADMIN ---
 let db;
+let initError = null;
+
 try {
     const serviceAccountPath = path.join(__dirname, 'serviceAccountKey.json');
 
@@ -17,7 +19,7 @@ try {
         const rawData = fs.readFileSync(serviceAccountPath, 'utf8');
         const serviceAccount = JSON.parse(rawData);
 
-        // XỬ LÝ PRIVATE KEY TRIỆT ĐỂ (Xóa khoảng trắng, sửa newline)
+        // Fix lỗi format Private Key (đảm bảo không bị sai ký tự xuống dòng)
         if (serviceAccount.private_key) {
             serviceAccount.private_key = serviceAccount.private_key
                 .replace(/\\n/g, '\n')
@@ -25,19 +27,20 @@ try {
                 .trim();
         }
 
-        // Khởi tạo App với ID riêng để tránh cache/conflict trên Render
-        const appName = `shop-app-${Date.now()}`;
-        const firebaseApp = admin.initializeApp({
-            credential: admin.credential.cert(serviceAccount),
-            projectId: serviceAccount.project_id
-        }, appName);
+        // Khởi tạo app mặc định (Default App)
+        if (admin.apps.length === 0) {
+            admin.initializeApp({
+                credential: admin.credential.cert(serviceAccount)
+            });
+            console.log("✅ Firebase Admin Initialized - Project:", serviceAccount.project_id);
+        }
 
-        db = firebaseApp.firestore();
-        console.log(`✅ Firebase Ready [${serviceAccount.project_id}] - Time: ${new Date().toISOString()}`);
+        db = admin.firestore();
     } else {
-        console.error("❌ ERROR: Missing serviceAccountKey.json");
+        initError = "File serviceAccountKey.json not found on server";
     }
 } catch (e) {
+    initError = e.message;
     console.error("❌ Firebase Init Error:", e.message);
 }
 
@@ -52,31 +55,31 @@ const payos = new PayOS(
     process.env.PAYOS_CHECKSUM_KEY
 );
 
-// --- 4. API DEBUG (Rất quan trọng để check lỗi 16) ---
+// --- 4. API DEBUG (Đã sửa lỗi crash) ---
 app.get('/debug', (req, res) => {
-    res.json({
-        status: db ? "Firebase Connected" : "Firebase Null",
-        serverTimeUTC: new Date().toISOString(),
-        nodeVersion: process.version,
-        adminVersion: require('firebase-admin/package.json').version,
-        projectId: admin.apps.length > 0 ? admin.app().options.projectId : "N/A",
-        hint: "Nếu giờ server lệch quá 5 phút so với giờ điện thoại, đó là nguyên nhân lỗi 16."
-    });
+    try {
+        res.json({
+            firebaseStatus: db ? "Connected" : "Failed",
+            initError: initError,
+            serverTimeUTC: new Date().toISOString(),
+            projectId: (admin.apps.length > 0 && admin.app().options.credential) ? admin.app().options.projectId : "N/A",
+            nodeVersion: process.version
+        });
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
 });
 
 // --- 5. API TẠO LINK THANH TOÁN ---
 app.post('/create-payment-link', async (req, res) => {
     try {
-        if (!db) throw new Error("Database connection not established");
+        if (!db) throw new Error(`Firebase not initialized: ${initError}`);
 
         const { orderId, accountCode } = req.body;
 
-        // Gọi thử Firestore để kiểm tra Auth ngay lập tức
+        // Kiểm tra kết nối Firestore (Lỗi 16 thường nổ ra tại đây)
         const orderRef = db.collection('orders').doc(orderId);
-        const orderDoc = await orderRef.get().catch(err => {
-            // NẾU LỖI 16 XẢY RA, NÓ SẼ BỊ BẮT Ở ĐÂY
-            throw new Error(`Firestore Auth Error (${err.code}): ${err.message}`);
-        });
+        const orderDoc = await orderRef.get();
 
         if (!orderDoc.exists) return res.status(404).json({ error: "Order not found" });
 
@@ -100,15 +103,14 @@ app.post('/create-payment-link', async (req, res) => {
         res.json({ checkoutUrl: paymentLinkResponse.checkoutUrl, orderCode });
 
     } catch (error) {
-        console.error("🔥 SERVER ERROR:", error.message);
+        console.error("🔥 Server Error:", error.message);
         res.status(500).json({
             error: error.message,
-            full_error: error.toString() // Trả về chi tiết để debug trên Flutter
+            isAuthError: error.message.includes('16') || error.message.includes('UNAUTHENTICATED')
         });
     }
 });
 
-// --- API WEBHOOK, SUCCESS, CANCEL ---
 app.post('/payos-webhook', async (req, res) => {
     try {
         const webhookData = await payos.webhooks.verify(req.body);
@@ -151,8 +153,8 @@ app.post('/payos-webhook', async (req, res) => {
     }
 });
 
-app.get('/success', (req, res) => res.send("Thanh toán thành công!"));
-app.get('/cancel', (req, res) => res.send("Giao dịch bị hủy."));
+app.get('/success', (req, res) => res.send("Thành công!"));
+app.get('/cancel', (req, res) => res.send("Hủy bỏ."));
 
 const PORT = process.env.PORT || 10000;
-app.listen(PORT, '0.0.0.0', () => console.log(`🚀 Server ready on port ${PORT}`));
+app.listen(PORT, '0.0.0.0', () => console.log(`🚀 Server listening on port ${PORT}`));
