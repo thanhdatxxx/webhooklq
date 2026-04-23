@@ -1,10 +1,13 @@
 require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
-const { PayOS } = require('@payos/node');
+const { PayOS } = require('@payos/node').default; // Fix lỗi constructor
 const admin = require('firebase-admin');
 
-// --- 1. KHỞI TẠO FIREBASE ADMIN ---
+const app = express();
+
+// --- 1. CẤU HÌNH FIREBASE ADMIN ---
+// Đọc từ biến môi trường trên Render mà bạn đã thiết lập
 const serviceAccount = process.env.FIREBASE_SERVICE_ACCOUNT_KEY 
     ? JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT_KEY) 
     : require("./serviceAccountKey.json");
@@ -16,24 +19,26 @@ if (!admin.apps.length) {
 }
 const db = admin.firestore();
 
-const app = express();
-app.use(cors());
+// --- 2. MIDDLEWARE ---
+app.use(cors()); // Fix lỗi Failed to fetch
 app.use(express.json());
+app.use(express.urlencoded({ extended: false }));
 
+// --- 3. KHỞI TẠO PAYOS ---
 const payos = new PayOS(
     process.env.PAYOS_CLIENT_ID,
     process.env.PAYOS_API_KEY,
     process.env.PAYOS_CHECKSUM_KEY
 );
 
-// --- 2. CÁC ROUTE ĐIỀU HƯỚNG (FIX LỖI CANNOT GET /SUCCESS) ---
+// --- 4. CÁC ĐƯỜNG DẪN GIAO DIỆN (FIX LỖI CANNOT GET) ---
 app.get('/success', (req, res) => {
-    // Chuyển hướng khách về lại trang web của bạn sau 3 giây hoặc hiện thông báo
     res.send(`
         <html>
-            <body style="text-align:center; font-family:sans-serif; padding-top:50px;">
-                <h2 style="color:green;">Thanh toán thành công!</h2>
-                <p>Hệ thống đang xử lý đơn hàng. Vui lòng quay lại ứng dụng Shop.</p>
+            <body style="text-align:center; font-family:sans-serif; padding-top:100px; background:#0f172a; color:white;">
+                <h1 style="color:#4ade80;">Thanh toán thành công!</h1>
+                <p>Hệ thống đang xử lý giao dịch ngầm.</p>
+                <p>Vui lòng quay lại ứng dụng của bạn.</p>
                 <script>setTimeout(() => { window.close(); }, 3000);</script>
             </body>
         </html>
@@ -41,25 +46,28 @@ app.get('/success', (req, res) => {
 });
 
 app.get('/cancel', (req, res) => {
-    res.send("Giao dịch đã bị hủy. Vui lòng quay lại Shop.");
+    res.send("Giao dịch đã bị hủy. Vui lòng đóng cửa sổ này.");
 });
 
-// --- 3. API TẠO LINK THANH TOÁN ---
+// --- 5. API TẠO LINK THANH TOÁN ---
 app.post('/create-payment-link', async (req, res) => {
     try {
-        const { amount, accountCode, userName } = req.body;
+        const { amount, accountId, accountCode, userName } = req.body;
+        
+        // Tạo mã đơn hàng ngẫu nhiên (số)
         const orderCode = Number(Date.now().toString().slice(-6));
 
         const body = {
             orderCode: orderCode,
             amount: amount,
-            // Gắn thông tin vào description để Webhook đọc lại
-            description: `MS${accountCode} USER_${userName}`, 
+            // Gắn Document ID vào description để Webhook tìm chính xác 100%
+            description: `ID_${accountId} MS${accountCode} USER_${userName}`,
             cancelUrl: `https://webhooklq.onrender.com/cancel`,
             returnUrl: `https://webhooklq.onrender.com/success`,
         };
 
-        const paymentLinkResponse = await payos.paymentRequests.create(body);
+        const paymentLinkResponse = await payos.createPaymentLink(body);
+        
         res.json({
             checkoutUrl: paymentLinkResponse.checkoutUrl,
             orderCode: orderCode
@@ -70,61 +78,56 @@ app.post('/create-payment-link', async (req, res) => {
     }
 });
 
-// --- 4. API WEBHOOK (XỬ LÝ TỰ ĐỘNG FIREBASE) ---
+// --- 6. API WEBHOOK (XỬ LÝ TỰ ĐỘNG HOÀN TOÀN) ---
 app.post('/payos-webhook', async (req, res) => {
     try {
-        const webhookData = await payos.webhooks.verify(req.body);
-        
+        // Xác thực tin nhắn từ PayOS
+        const webhookData = payos.verifyPaymentWebhookData(req.body);
+
         if (webhookData) {
-            console.log("✅ Webhook nhận dữ liệu:", webhookData.description);
+            console.log("✅ Nhận tín hiệu thanh toán thành công:", webhookData.description);
             
-            // Trích xuất MS và User từ description (Ví dụ: "MS123002 USER_thanhdat")
+            // Trích xuất thông tin từ description
             const desc = webhookData.description;
-            const accountCodeMatch = desc.match(/MS(\d+)/);
-            const userMatch = desc.match(/USER_(\w+)/);
+            const docId = desc.match(/ID_(\w+)/)?.[1]; // Lấy Document ID
+            const userName = desc.match(/USER_(\w+)/)?.[1] || "Unknown";
+            const accountCode = desc.match(/MS(\d+)/)?.[1] || "000";
 
-            if (accountCodeMatch) {
-                const accountCode = parseInt(accountCodeMatch[1]);
-                const userName = userMatch ? userMatch[1] : "Unknown";
+            if (docId) {
+                // A. Cập nhật trạng thái nick trong Firestore bằng ID trực tiếp
+                const accountRef = db.collection('accounts').doc(docId);
+                await accountRef.update({
+                    status: 'Đã bán',
+                    sold_to: userName,
+                    sold_at: admin.firestore.FieldValue.serverTimestamp()
+                });
 
-                // A. Tìm Nick trong Firestore
-                const snapshot = await db.collection('accounts')
-                    .where('account_code', '==', accountCode)
-                    .limit(1).get();
+                // B. Ghi vào lịch sử mua hàng cho người dùng
+                await db.collection('history').add({
+                    user_name: userName,
+                    account_code: parseInt(accountCode),
+                    account_id: docId,
+                    amount: webhookData.amount,
+                    transaction_code: webhookData.orderCode.toString(),
+                    type: 'purchase',
+                    created_at: admin.firestore.FieldValue.serverTimestamp()
+                });
 
-                if (!snapshot.empty) {
-                    const doc = snapshot.docs[0];
-                    
-                    // B. Cập nhật trạng thái Nick
-                    await doc.ref.update({
-                        status: 'Đã bán',
-                        sold_to: userName,
-                        sold_at: admin.firestore.FieldValue.serverTimestamp()
-                    });
-
-                    // C. Ghi lịch sử giao dịch
-                    await db.collection('history').add({
-                        user_name: userName,
-                        account_code: accountCode,
-                        account_id: doc.id,
-                        amount: webhookData.amount,
-                        transaction_code: webhookData.orderCode.toString(),
-                        type: 'purchase',
-                        created_at: admin.firestore.FieldValue.serverTimestamp()
-                    });
-                    
-                    console.log(`💾 Đã cập nhật Firebase cho đơn hàng MS${accountCode}`);
-                }
+                console.log(`💾 Đã giao nick ID: ${docId} cho User: ${userName}`);
             }
         }
+
+        // Phải trả về response này PayOS mới không gửi lại Webhook nữa
         return res.json({ error: 0, message: "Ok", data: null });
+
     } catch (error) {
-        console.error("Webhook Error:", error);
-        return res.json({ error: -1, message: "Lỗi", data: null });
+        console.error("❌ Webhook Error:", error);
+        return res.json({ error: -1, message: "Lỗi xác thực", data: null });
     }
 });
 
+// --- 7. START SERVER ---
 const PORT = process.env.PORT || 10000;
 app.listen(PORT, '0.0.0.0', () => {
-    console.log(`Server is running on port ${PORT}`);
+    console.log(`🚀 Server is running on port ${PORT}`);
 });
