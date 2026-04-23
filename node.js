@@ -1,6 +1,6 @@
 const express = require('express');
-const cors = require('cors'); // PHẢI CÓ
-const PayOS = require("@payos/node").default; // Thêm .default ở đây
+const cors = require('cors');
+const { PayOS } = require("@payos/node");
 
 const app = express();
 
