@@ -7,19 +7,21 @@ const admin = require('firebase-admin');
 const app = express();
 
 // --- 1. CẤU HÌNH FIREBASE ADMIN ---
-const serviceAccount = process.env.FIREBASE_SERVICE_ACCOUNT_KEY
-    ? JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT_KEY)
-    : require("./serviceAccountKey.json");
-
-const admin = require('firebase-admin');
 const serviceAccountKey = process.env.FIREBASE_SERVICE_ACCOUNT_KEY;
 
 if (!admin.apps.length) {
     try {
-        const config = JSON.parse(serviceAccountKey);
-        // Quan trọng: Fix lỗi ký tự \n trong Private Key trên Render
-        config.private_key = config.private_key.replace(/\\n/g, '\n');
-        
+        let config;
+        if (serviceAccountKey) {
+            config = JSON.parse(serviceAccountKey);
+            // Quan trọng: Fix lỗi ký tự \n trong Private Key trên Render
+            if (config.private_key) {
+                config.private_key = config.private_key.replace(/\\n/g, '\n');
+            }
+        } else {
+            config = require("./serviceAccountKey.json");
+        }
+
         admin.initializeApp({
             credential: admin.credential.cert(config)
         });
@@ -29,6 +31,7 @@ if (!admin.apps.length) {
     }
 }
 const db = admin.firestore();
+
 // --- 2. MIDDLEWARE ---
 app.use(cors());
 app.use(express.json());
@@ -73,15 +76,15 @@ app.post('/create-payment-link', async (req, res) => {
         // 3. Cập nhật mã chuyển khoản vào Order để Webhook đối soát
         await orderRef.update({
             orderCode: orderCode,
-            account_code: Number(accountCode), // Lưu thêm để hiện trong history sau này
+            account_code: Number(accountCode),
             status: 'pending'
         });
 
         // 4. Tạo Link PayOS
         const body = {
             orderCode: orderCode,
-            amount: Math.round(amount), // Đảm bảo là số nguyên
-            description: `THANH TOAN MS${accountCode}`,
+            amount: Math.round(amount),
+            description: `MS${accountCode}`,
             cancelUrl: `https://webhooklq.onrender.com/cancel`,
             returnUrl: `https://webhooklq.onrender.com/success`,
         };
@@ -117,7 +120,8 @@ app.post('/payos-webhook', async (req, res) => {
                 // 2. Lấy thông tin Nick và User
                 const accountRef = db.collection('accounts').doc(account_id);
                 const accountSnap = await accountRef.get();
-                const userSnap = await db.collection('users').doc(user_id).get();
+                // Sửa từ 'users' thành 'user' cho đúng cấu trúc bạn đã mô tả
+                const userSnap = await db.collection('user').doc(user_id).get();
 
                 if (accountSnap.exists) {
                     const accountData = accountSnap.data();
@@ -130,7 +134,7 @@ app.post('/payos-webhook', async (req, res) => {
                         sold_at: admin.firestore.FieldValue.serverTimestamp()
                     });
 
-                    // B. Ghi lịch sử giao dịch (Đầy đủ thông tin để App hiển thị)
+                    // B. Ghi lịch sử giao dịch
                     await db.collection('history').add({
                         user_id: user_id,
                         user_name: userName,
