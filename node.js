@@ -11,13 +11,24 @@ const serviceAccount = process.env.FIREBASE_SERVICE_ACCOUNT_KEY
     ? JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT_KEY)
     : require("./serviceAccountKey.json");
 
+const admin = require('firebase-admin');
+const serviceAccountKey = process.env.FIREBASE_SERVICE_ACCOUNT_KEY;
+
 if (!admin.apps.length) {
-    admin.initializeApp({
-        credential: admin.credential.cert(serviceAccount)
-    });
+    try {
+        const config = JSON.parse(serviceAccountKey);
+        // Quan trọng: Fix lỗi ký tự \n trong Private Key trên Render
+        config.private_key = config.private_key.replace(/\\n/g, '\n');
+        
+        admin.initializeApp({
+            credential: admin.credential.cert(config)
+        });
+        console.log("✅ Firebase Admin Ready");
+    } catch (e) {
+        console.error("❌ Firebase Auth Error:", e);
+    }
 }
 const db = admin.firestore();
-
 // --- 2. MIDDLEWARE ---
 app.use(cors());
 app.use(express.json());
