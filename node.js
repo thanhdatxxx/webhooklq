@@ -1,72 +1,124 @@
 const express = require('express');
-const { PayOS } = require("@payos/node");
 const cors = require('cors');
+const axios = require('axios');
+const crypto = require('crypto');
 
 const app = express();
 
-// Cấu hình CORS cực kỳ quan trọng
-app.use(cors({
-    origin: '*', // Cho phép tất cả các nguồn (bao gồm localhost của bạn)
-    methods: ['GET', 'POST'],
-    allowedHeaders: ['Content-Type']
-}));
+// PayOS Config
+const PAYOS_CLIENT_ID = process.env.PAYOS_CLIENT_ID;
+const PAYOS_API_KEY = process.env.PAYOS_API_KEY;
+const PAYOS_CHECKSUM_KEY = process.env.PAYOS_CHECKSUM_KEY;
+const PAYOS_API_URL = 'https://api-merchant.payos.vn/v2/payment-requests';
 
-app.use(express.json());
-
-// 1. Cấu hình PayOS với thông tin bạn đã chụp ảnh
-// Cập nhật phần cấu hình PayOS trong file node.js
-const payos = new PayOS({
-    PAYOS_CLIENT_ID: process.env.PAYOS_CLIENT_ID,
-    PAYOS_API_KEY: process.env.PAYOS_API_KEY,
-    PAYOS_CHECKSUM_KEY: process.env.PAYOS_CHECKSUM_KEY
-});
+// Function to generate signature
+function generateSignature(data, checksumKey) {
+    const sortedData = Object.keys(data)
+        .sort()
+        .reduce((result, key) => {
+            result[key] = data[key];
+            return result;
+        }, {});
+    
+    const dataString = Object.entries(sortedData)
+        .map(([key, value]) => `${key}=${value}`)
+        .join('&');
+    
+    return crypto
+        .createHmac('sha256', checksumKey)
+        .update(dataString)
+        .digest('hex');
+}
 
 // 2. API Tạo link thanh toán VietQR
 app.post('/create-payment-link', async (req, res) => {
-    const { amount, accountCode, userName } = req.body;
-
-    const orderCode = Number(Date.now().toString().slice(-6)); // Tạo mã đơn hàng số
-    const body = {
-        orderCode: orderCode,
-        amount: amount,
-        description: `Thanh toan MS${accountCode}`,
-        returnUrl: `https://your-web-app.com/success`, // Trang quay lại khi khách thanh toán xong
-        cancelUrl: `https://your-web-app.com/cancel`,
-    };
-
     try {
-        const paymentLinkResponse = await payos.createPaymentLink(body);
-        // Lưu orderCode này vào Database của bạn để đối soát sau này
-        res.json({ checkoutUrl: paymentLinkResponse.checkoutUrl, orderCode });
+        const { amount, accountCode, userName } = req.body;
+
+        const orderCode = Number(Date.now().toString().slice(-6));
+        const returnUrl = 'https://your-web-app.com/success';
+        const cancelUrl = 'https://your-web-app.com/cancel';
+        
+        const dataForSignature = {
+            amount: amount,
+            cancelUrl: cancelUrl,
+            description: `Thanh toan MS${accountCode}`,
+            orderCode: orderCode,
+            returnUrl: returnUrl
+        };
+
+        const signature = generateSignature(dataForSignature, PAYOS_CHECKSUM_KEY);
+
+        const body = {
+            ...dataForSignature,
+            signature: signature
+        };
+
+        const response = await axios.post(PAYOS_API_URL, body, {
+            headers: {
+                'x-client-id': PAYOS_CLIENT_ID,
+                'x-api-key': PAYOS_API_KEY,
+                'Content-Type': 'application/json'
+            }
+        });
+
+        // Lưu orderCode vào Database để đối soát
+        res.json({ 
+            checkoutUrl: response.data.data.checkoutUrl, 
+            qrCode: response.data.data.qrCode,
+            orderCode: orderCode
+        });
     } catch (error) {
-        res.status(500).json({ error: error.message });
+        console.error("Error creating payment link:", error.response?.data || error.message);
+        res.status(500).json({ error: error.response?.data || error.message });
     }
 });
 
-//3. API Webhook - Sửa lại để trả về đúng chuẩn PayOS yêu cầu
+//3. API Webhook - Nhận thông tin thanh toán từ PayOS
 app.post('/payos-webhook', async (req, res) => {
     try {
-        const webhookData = payos.verifyPaymentWebhookData(req.body);
+        const { code, desc, success, data, signature } = req.body;
 
-        if (webhookData) {
-            console.log("Thanh toán thành công đơn hàng:", webhookData.orderCode);
+        // Verify signature
+        const dataForSignature = {
+            amount: data.amount,
+            description: data.description,
+            orderCode: data.orderCode,
+            transactionDateTime: data.transactionDateTime,
+            accountNumber: data.accountNumber,
+            reference: data.reference,
+            currency: data.currency
+        };
 
-            // TẠI ĐÂY: Bạn viết code để tự động gửi mật khẩu cho khách
-            // Ví dụ: updateDatabase(webhookData.orderCode, "Đã giao hàng");
+        const computedSignature = generateSignature(dataForSignature, PAYOS_CHECKSUM_KEY);
+
+        if (computedSignature !== signature) {
+            console.log("Invalid signature");
+            return res.status(400).json({
+                error: 1,
+                message: "Invalid signature",
+                data: null
+            });
         }
 
-        // PHẢI trả về đúng định dạng này PayOS mới chấp nhận
-        return res.json({
+        if (success) {
+            console.log("Thanh toán thành công đơn hàng:", data.orderCode);
+            // TẠI ĐÂY: Cập nhật database, gửi email, v.v.
+            // Ví dụ: updateDatabase(data.orderCode, "Đã thanh toán");
+        }
+
+        // PHẢI trả về 2XX để xác nhận webhook
+        return res.status(200).json({
             error: 0,
             message: "Ok",
             data: null
         });
 
     } catch (error) {
-        console.error("Lỗi Webhook:", error);
-        return res.json({
-            error: -1,
-            message: "Mã lỗi xác thực dữ liệu",
+        console.error("Webhook error:", error);
+        return res.status(500).json({
+            error: 99,
+            message: "Internal error",
             data: null
         });
     }
