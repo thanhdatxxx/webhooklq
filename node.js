@@ -2,7 +2,7 @@ require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
 
-// Import PayOS - thử cách này trước
+// Import PayOS
 const { PayOS } = require('@payos/node'); 
 
 const admin = require('firebase-admin');
@@ -70,7 +70,7 @@ app.post('/create-payment-link', async (req, res) => {
             returnUrl: `https://webhooklq.onrender.com/success`,
         };
 
-        const paymentLinkResponse = await payos.createPaymentLink(body);
+        const paymentLinkResponse = await payos.paymentRequests.create(body);
         
         res.json({
             checkoutUrl: paymentLinkResponse.checkoutUrl,
@@ -86,7 +86,7 @@ app.post('/create-payment-link', async (req, res) => {
 app.post('/payos-webhook', async (req, res) => {
     try {
         // Xác thực tin nhắn từ PayOS
-        const webhookData = payos.verifyPaymentWebhookData(req.body);
+        const webhookData = await payos.webhooks.verify(req.body);
 
         if (webhookData) {
             console.log("✅ Nhận tín hiệu thanh toán thành công:", webhookData.description);
