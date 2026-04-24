@@ -3,31 +3,26 @@ const express = require('express');
 const cors = require('cors');
 const { PayOS } = require('@payos/node');
 const admin = require('firebase-admin');
-const path = require('path');
-const fs = require('fs');
 
 const app = express();
 
-// --- 1. CẤU HÌNH FIREBASE ADMIN ---
+// --- 1. CẤU HÌNH FIREBASE ADMIN (PHIÊN BẢN CHỐNG LỖI 16) ---
 let db;
 let initError = null;
 
 try {
-    const serviceAccountPath = path.join(__dirname, 'serviceAccountKey.json');
+    const base64Config = process.env.FIREBASE_CONFIG_BASE64;
 
-    if (fs.existsSync(serviceAccountPath)) {
-        const rawData = fs.readFileSync(serviceAccountPath, 'utf8');
-        const serviceAccount = JSON.parse(rawData);
+    if (base64Config) {
+        // Giải mã chuỗi Base64 từ biến môi trường của Render
+        const serviceAccount = JSON.parse(Buffer.from(base64Config, 'base64').toString('utf-8'));
 
-        // Fix lỗi format Private Key (đảm bảo không bị sai ký tự xuống dòng)
+        // Xử lý Private Key để tránh lỗi định dạng ký tự xuống dòng
         if (serviceAccount.private_key) {
-            serviceAccount.private_key = serviceAccount.private_key
-                .replace(/\\n/g, '\n')
-                .replace(/\n/g, '\n')
-                .trim();
+            serviceAccount.private_key = serviceAccount.private_key.replace(/\\n/g, '\n');
         }
 
-        // Khởi tạo app mặc định (Default App)
+        // Khởi tạo Firebase Admin
         if (admin.apps.length === 0) {
             admin.initializeApp({
                 credential: admin.credential.cert(serviceAccount)
@@ -37,7 +32,8 @@ try {
 
         db = admin.firestore();
     } else {
-        initError = "File serviceAccountKey.json not found on server";
+        initError = "Thiếu biến môi trường FIREBASE_CONFIG_BASE64 trên Render!";
+        console.error("❌", initError);
     }
 } catch (e) {
     initError = e.message;
@@ -55,19 +51,14 @@ const payos = new PayOS(
     process.env.PAYOS_CHECKSUM_KEY
 );
 
-// --- 4. API DEBUG (Đã sửa lỗi crash) ---
+// --- 4. API DEBUG (Để bạn kiểm tra xem Firebase đã thông chưa) ---
 app.get('/debug', (req, res) => {
-    try {
-        res.json({
-            firebaseStatus: db ? "Connected" : "Failed",
-            initError: initError,
-            serverTimeUTC: new Date().toISOString(),
-            projectId: (admin.apps.length > 0 && admin.app().options.credential) ? admin.app().options.projectId : "N/A",
-            nodeVersion: process.version
-        });
-    } catch (e) {
-        res.status(500).json({ error: e.message });
-    }
+    res.json({
+        firebaseStatus: db ? "Connected" : "Failed",
+        initError: initError,
+        serverTimeUTC: new Date().toISOString(),
+        nodeVersion: process.version
+    });
 });
 
 // --- 5. API TẠO LINK THANH TOÁN ---
@@ -77,7 +68,7 @@ app.post('/create-payment-link', async (req, res) => {
 
         const { orderId, accountCode } = req.body;
 
-        // Kiểm tra kết nối Firestore (Lỗi 16 thường nổ ra tại đây)
+        // Truy vấn Firestore (Nếu bị lỗi 16, nó sẽ chết tại dòng này)
         const orderRef = db.collection('orders').doc(orderId);
         const orderDoc = await orderRef.get();
 
@@ -86,6 +77,7 @@ app.post('/create-payment-link', async (req, res) => {
         const { amount } = orderDoc.data();
         const orderCode = Number(Date.now().toString().slice(-9));
 
+        // Cập nhật thông tin đơn hàng trước khi sang PayOS
         await orderRef.update({
             orderCode,
             account_code: Number(accountCode),
@@ -96,8 +88,8 @@ app.post('/create-payment-link', async (req, res) => {
             orderCode,
             amount: Math.round(amount),
             description: `MS${accountCode}`,
-            cancelUrl: `https://webhooklq.onrender.com/cancel`,
-            returnUrl: `https://webhooklq.onrender.com/success`,
+            cancelUrl: `https://webhooklq.onrender.com/cancel`, // Thay bằng domain của bạn
+            returnUrl: `https://webhooklq.onrender.com/success`, // Thay bằng domain của bạn
         });
 
         res.json({ checkoutUrl: paymentLinkResponse.checkoutUrl, orderCode });
@@ -111,10 +103,13 @@ app.post('/create-payment-link', async (req, res) => {
     }
 });
 
+// --- 6. WEBHOOK XỬ LÝ KHI THANH TOÁN XONG ---
 app.post('/payos-webhook', async (req, res) => {
     try {
         const webhookData = await payos.webhooks.verify(req.body);
+        
         if (webhookData) {
+            // Tìm đơn hàng dựa trên orderCode từ PayOS
             const ordersSnapshot = await db.collection('orders')
                 .where('orderCode', '==', webhookData.orderCode)
                 .limit(1).get();
@@ -122,16 +117,21 @@ app.post('/payos-webhook', async (req, res) => {
             if (!ordersSnapshot.empty) {
                 const orderDoc = ordersSnapshot.docs[0];
                 const { user_id, account_id, amount, account_code } = orderDoc.data();
+                
                 const accountRef = db.collection('accounts').doc(account_id);
                 const accountSnap = await accountRef.get();
 
                 if (accountSnap.exists) {
                     const accountData = accountSnap.data();
+
+                    // 1. Cập nhật trạng thái Account sang "Đã bán"
                     await accountRef.update({
                         status: 'Đã bán',
                         sold_to: user_id,
                         sold_at: admin.firestore.FieldValue.serverTimestamp()
                     });
+
+                    // 2. Lưu vào lịch sử mua hàng
                     await db.collection('history').add({
                         user_id,
                         account_id,
@@ -143,18 +143,21 @@ app.post('/payos-webhook', async (req, res) => {
                         type: 'purchase',
                         created_at: admin.firestore.FieldValue.serverTimestamp()
                     });
+
+                    // 3. Đánh dấu đơn hàng hoàn tất
                     await orderDoc.ref.update({ status: 'completed' });
                 }
             }
         }
         return res.json({ error: 0 });
     } catch (error) {
+        console.error("Webhook Error:", error.message);
         return res.json({ error: -1 });
     }
 });
 
-app.get('/success', (req, res) => res.send("Thành công!"));
-app.get('/cancel', (req, res) => res.send("Hủy bỏ."));
+app.get('/success', (req, res) => res.send("Thanh toán thành công! Hệ thống đang xử lý."));
+app.get('/cancel', (req, res) => res.send("Bạn đã hủy thanh toán."));
 
 const PORT = process.env.PORT || 10000;
 app.listen(PORT, '0.0.0.0', () => console.log(`🚀 Server listening on port ${PORT}`));
